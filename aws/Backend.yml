@@ -1,0 +1,473 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description:
+  Doct backend stack template
+
+Parameters:
+  Environment:
+    Description: Deployment environment
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - pay
+      - qa
+      - stag
+      - prod
+
+  ProjectName:
+    Description: This will be used for tagging and resource names
+    Type: String
+    Default: Doct
+
+  DbStackName:
+    Description: Name of Detabase stack that this stack will connect to
+    Type: String
+    Default: DatabaseStack
+    
+  ApiHostname:
+    Type: String
+    Default: api
+
+  HostedZone:
+    Type: String
+    Default: doct.app
+
+  EIPProd1:
+    Description: ElasticIP1 for prod NAT
+    Type: String
+    Default: eipalloc-0cd190aa8e13e2760
+
+  EIPProd2:
+    Description: ElasticIP2 for prod NAT
+    Type: String
+    Default: eipalloc-07e2c5d1f5b6a7454
+
+Mappings:
+  Certificates:
+    eu-west-1:
+      dev: arn:aws:acm:eu-west-1:950464077869:certificate/7d84eec8-c2a4-4b09-a88d-f591580e010e
+      pay: arn:aws:acm:eu-west-1:950464077869:certificate/3cbf3245-4b1b-4aa4-af7b-2dc94252d9b5
+      qa: arn:aws:acm:eu-west-1:138022411913:certificate/41ec6517-5d66-4b0f-9449-191651bbeee9
+      stag: arn:aws:acm:eu-west-1:530286139891:certificate/1e8ecb25-5b80-4114-8da5-7940b1a25798
+      prod: arn:aws:acm:eu-west-1:274404885943:certificate/4b503be7-1e49-40d6-934a-49d95327993d
+  ContainerCpu:
+    Env:
+      dev: 256
+      pay: 256
+      qa: 256
+      stag: 256
+      prod: 256
+  ContainerMemory:
+    Env:
+      dev: 512
+      pay: 512
+      qa: 512
+      stag: 1024
+      prod: 1024
+  DesiredCount:
+    Env:
+      dev: 1
+      pay: 1
+      qa: 1
+      stag: 1
+      prod: 2
+
+Conditions:
+  IsPay: !Equals [!Ref Environment, pay]
+  IsProduction: !Equals [!Ref Environment, prod]
+  IsNotProduction: !Not [!Equals [!Ref Environment, prod]]
+
+Resources:
+### NAT for private subnets
+  EIP:
+    Condition: IsNotProduction
+    Type: AWS::EC2::EIP
+    Properties: 
+      Domain: vpc
+      Tags: 
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  NatGatewayA:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !If [IsProduction, !Ref EIPProd1, !GetAtt EIP.AllocationId]
+      SubnetId:
+        Fn::ImportValue:
+          !Sub '${DbStackName}-PublicSubnetZoneAId'
+      Tags:
+      - {Key: Name, Value: !Sub '${ProjectName}.${Environment}.NAT1'}
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  NatGatewayB:
+    Condition: IsProduction
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !Ref EIPProd2
+      SubnetId:
+        Fn::ImportValue:
+          !Sub '${DbStackName}-PublicSubnetZoneBId'
+      Tags:
+      - {Key: Name, Value: !Sub '${ProjectName}.${Environment}.NAT2'}
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  PrivateRouteToNAT1:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: '0.0.0.0/0'
+      NatGatewayId: !Ref NatGatewayA
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${DbStackName}-PrivateRouteTable1Id'
+
+  PrivateRouteToNAT2:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: '0.0.0.0/0'
+      NatGatewayId: !If [IsProduction, !Ref NatGatewayB, !Ref NatGatewayA]
+      RouteTableId:
+        Fn::ImportValue:
+          !Sub '${DbStackName}-PrivateRouteTable2Id'
+
+### LOAD BALANCER  
+# Application Load Balancer
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-ALB'
+      Scheme: internet-facing
+      SecurityGroups: [!Ref ALBSecurityGroup]
+      # LoadBalancerAttributes:
+      # - Key: idle_timeout.timeout_seconds
+      #   Value: '30'
+      Subnets:
+      - Fn::ImportValue:
+          !Sub '${DbStackName}-PublicSubnetZoneAId'
+      - Fn::ImportValue:
+          !Sub '${DbStackName}-PublicSubnetZoneBId'
+      Tags:
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+      IpAddressType: 'ipv4'
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${DbStackName}-VpcId'
+      GroupDescription: !Sub '${ProjectName} ${Environment} ALB Security Group'
+      SecurityGroupIngress:
+      - CidrIp: '0.0.0.0/0'
+        FromPort: 443
+        ToPort: 443
+        IpProtocol: 'tcp'
+      - CidrIp: '0.0.0.0/0'
+        FromPort: 80
+        ToPort: 80
+        IpProtocol: 'tcp'
+      # - CidrIp: '0.0.0.0/0'
+      #   FromPort: 8080
+      #   ToPort: 8080
+      #   IpProtocol: 'tcp'
+      # SecurityGroupIngress:
+      #   - CidrIp: '0.0.0.0/0'
+      #     IpProtocol: -1
+      Tags:
+      - {Key: Name, Value: !Sub '${ProjectName}.${Environment}.ALB.SG'}
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  HTTPSListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      Certificates:
+      - CertificateArn: !FindInMap [Certificates, eu-west-1, !Ref Environment]
+      DefaultActions:
+      - TargetGroupArn: !Ref TargetGroup
+        Type: 'forward'
+      LoadBalancerArn: !Ref ALB
+      Port: 443
+      Protocol: 'HTTPS'
+      SslPolicy: 'ELBSecurityPolicy-2016-08'
+
+  HTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: redirect
+        RedirectConfig:
+          Port: '443'
+          Protocol: HTTPS
+          StatusCode: HTTP_301
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 60
+      HealthCheckPath: /actuator/health
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 5
+      TargetType: ip
+      Matcher:
+        HttpCode: 200-499
+      Name: !Sub '${ProjectName}-${Environment}-TG'
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 3
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${DbStackName}-VpcId'
+
+### Fargate
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${ProjectName}-${Environment}-ECS-cluster'
+      Tags:
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  FargateService: 
+    Type: AWS::ECS::Service
+    DependsOn: HTTPSListener
+    Properties: 
+      Cluster: !Ref ECSCluster
+      ServiceName: !Sub '${ProjectName}-${Environment}-service'
+      LaunchType: FARGATE
+      DesiredCount: !FindInMap [DesiredCount, Env, !Ref Environment]
+      TaskDefinition: !Ref FargateTaskDefinition
+      LoadBalancers: 
+        - ContainerName: !Sub 'doct-${Environment}-ecr'
+          ContainerPort: 5060
+          TargetGroupArn: !Ref TargetGroup
+      NetworkConfiguration: 
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups: 
+            - !Ref FargateSecurityGroup
+          Subnets:
+          - Fn::ImportValue:
+              !Sub '${DbStackName}-PrivateSubnetZoneAId'
+          - Fn::ImportValue:
+              !Sub '${DbStackName}-PrivateSubnetZoneBId'
+      Tags:
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  FargateSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${DbStackName}-VpcId'
+      GroupDescription: Access to the Fargate service and the tasks/containers that run on them
+      SecurityGroupIngress:
+        - SourceSecurityGroupId: !Ref ALBSecurityGroup
+          IpProtocol: -1
+      Tags:
+      - {Key: Name, Value: !Sub '${ProjectName}.${Environment}.Fargate.SG'}
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  DatabaseSecurityGroupIngress:
+    Type : AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId:
+        Fn::ImportValue: !Sub '${DbStackName}-DBSecurityGroupId'
+      IpProtocol: tcp
+      FromPort: 1433
+      ToPort: 1433
+      SourceSecurityGroupId: !Ref FargateSecurityGroup
+
+  FargateTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Cpu: !FindInMap [ContainerCpu, Env, !Ref Environment]
+      RequiresCompatibilities: 
+        - FARGATE
+      Family: !Ref ProjectName
+      NetworkMode: awsvpc
+      ExecutionRoleArn: !Ref EcsTaskExecutionRole
+      TaskRoleArn: !Ref EcsTaskRole
+      Memory: !FindInMap [ContainerMemory, Env, !Ref Environment]
+      ContainerDefinitions:
+        - Name: !Sub 'doct-${Environment}-ecr'
+          Essential: true
+          Environment:
+            - Name: PROFILE
+              Value: !Ref Environment
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.eu-west-1.amazonaws.com/doct-${Environment}-ecr:latest'
+          PortMappings:
+            - ContainerPort: 5060
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              # awslogs-create-group: true
+              awslogs-group: !Sub 'aws-logs-${ProjectName}-${Environment}'
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: !Sub 'aws-logs-stream-${ProjectName}'
+          # Secrets:
+            # - Name: 'DB_USER'
+            #   ValueFrom: !Sub '/${ProjectName}/db.username'
+            # - Name: 'DB_PASSWORD'
+            #   ValueFrom: !Sub '/${ProjectName}/db.password'
+      Tags:
+      - {Key: Name, Value: !Sub '${ProjectName}.${Environment}.Fargate.TD'}
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  EcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs-tasks.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+        - PolicyName: !Sub '${ProjectName}.${Environment}.EcsTaskExecutionRolePolicy'
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+            - Effect: Allow
+              Action:
+                - 'ecr:GetAuthorizationToken'
+                - 'ecr:BatchCheckLayerAvailability'
+                - 'ecr:GetDownloadUrlForLayer'
+                - 'ecr:BatchGetImage'
+                - 'logs:CreateLogStream'
+                - 'logs:PutLogEvents'
+                - 'logs:CreateLogGroup'
+              Resource: '*'
+        # - PolicyName: !Sub '${ProjectName}.${Environment}.SsmPolicy'
+        #   PolicyDocument:
+        #     Statement:
+        #     - Effect: Allow
+        #       Action:
+        #       - "ssm:*"
+        #       Resource: '*'
+
+  EcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs-tasks.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:              
+        - PolicyName: !Sub '${ProjectName}.${Environment}.S3Policy'
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+            - Effect: Allow
+              Action:
+              - s3:*
+              # - s3:GetBucketLocation
+              # - s3:PutObject
+              # - s3:GetObject
+              # - s3:DeleteObject
+              Resource: 'arn:aws:s3:::*'
+        - PolicyName: !Sub '${ProjectName}.${Environment}.SESPolicy'
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+            - Effect: Allow
+              Action:
+              - ses:*
+              Resource: '*'
+        - PolicyName: !Sub '${ProjectName}.${Environment}.SsmPolicy'
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+            - Effect: Allow
+              Action:
+              - "ssm:GetParameterHistory"
+              - "ssm:GetParametersByPath"
+              - "ssm:GetParameters"
+              - "ssm:GetParameter"
+              Resource:  
+              - !Sub "arn:aws:ssm:eu-west-1:${AWS::AccountId}:parameter/*"
+            # - Effect: Allow
+            #   Action:
+            #   - "ssm:*"
+            #   Resource: '*'
+        - PolicyName: !Sub '${ProjectName}.${Environment}.KMSPolicy'
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+            - Effect: Allow
+              Action:
+              - "kms:Decrypt"
+              - "kms:GenerateDataKey"
+              Resource: '*'
+        - PolicyName: !Sub '${ProjectName}.${Environment}.SQSPolicy'
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+            - Effect: Allow
+              Action:
+              -  "sqs:SendMessage"
+              -  "sqs:ReceiveMessage"
+              -  "sqs:DeleteMessage"
+              Resource: "*"
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: !Sub 'aws-logs-${ProjectName}-${Environment}'
+      RetentionInDays: !If [IsProduction , 60, 7]
+
+### ROUTE 53
+  InternalHostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      HostedZoneConfig: 
+        Comment: !Sub 'Internal zone for ${ProjectName}, ${Environment}'
+      Name: !Sub '${ProjectName}.internal'
+      VPCs:
+      - VPCId:
+          Fn::ImportValue: 
+            !Sub '${DbStackName}-VpcId'
+        VPCRegion: eu-west-1
+      HostedZoneTags: 
+      - {Key: Name, Value: !Sub '${ProjectName}.${Environment}'}
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  DatabaseDNS: 
+    Type : AWS::Route53::RecordSetGroup
+    Properties: 
+      Comment: !Sub 'Internal DNS name for ${ProjectName} database, ${Environment}'
+      HostedZoneId: !Ref InternalHostedZone
+      RecordSets: 
+      - Name: !If [IsPay, !Sub 'paydatabase.${ProjectName}.internal.', !Sub 'database.${ProjectName}.internal.']
+        Type: CNAME
+        TTL: 300
+        ResourceRecords: 
+        - Fn::ImportValue: 
+            !Sub '${DbStackName}-DBEndpointAdress'
+
+  DnsRecords:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      Comment: !Sub '${ProjectName} dns records'
+      HostedZoneName: !If [IsProduction ,!Sub '${HostedZone}.',  !Sub '${Environment}.${HostedZone}.']
+      RecordSets:
+      - Name: !If [IsProduction ,!Sub '${ApiHostname}.${HostedZone}.',  !Sub '${ApiHostname}.${Environment}.${HostedZone}.']
+        Type: A
+        AliasTarget:
+          HostedZoneId: !GetAtt ALB.CanonicalHostedZoneID
+          DNSName: !GetAtt ALB.DNSName

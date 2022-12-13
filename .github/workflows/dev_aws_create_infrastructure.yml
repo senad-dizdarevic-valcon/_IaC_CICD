@@ -1,0 +1,50 @@
+name: DEV - Create Inf. Stack
+
+env:
+  aws_env: 'dev'
+
+on:
+  schedule:
+    - cron: '30 5 * * 1-5'  # at 5:30 UTC on every day-of-week from Monday through Friday
+  workflow_dispatch:
+  
+jobs:
+  Build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_DEV }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_DEV }}
+          aws-region: eu-west-1
+      
+      - name: Create Database stack
+        run: |
+          rds_snapshot=$(aws rds describe-db-snapshots --db-instance-identifier Doct-${{ env.aws_env }}-database --query="reverse(sort_by(DBSnapshots, &SnapshotCreateTime))[0]|DBSnapshotIdentifier" --output text)
+          aws cloudformation create-stack --stack-name DatabaseStack --template-url https://doct-releases-dev.s3.eu-west-1.amazonaws.com/aws/Database.yml --parameters --parameters ParameterKey=DatabaseSnapshot,ParameterValue=$rds_snapshot ParameterKey=Environment,ParameterValue=${{ env.aws_env }}  --capabilities CAPABILITY_IAM
+          aws cloudformation wait stack-create-complete --stack-name DatabaseStack
+          # snapshot=$(aws rds describe-db-snapshots --db-instance-identifier Doct-${{ env.aws_env }}-database --query="reverse(sort_by(DBSnapshots, &SnapshotCreateTime))[5]|DBSnapshotIdentifier" --output text)
+          # aws rds delete-db-snapshot --db-snapshot-identifier $snapshot
+
+      - name: Create Backend stack
+        run: |
+          aws cloudformation create-stack --stack-name BackendStack --template-url https://doct-releases-dev.s3.eu-west-1.amazonaws.com/aws/Backend.yml --parameters ParameterKey=Environment,ParameterValue=${{ env.aws_env }}  --capabilities CAPABILITY_IAM
+          aws cloudformation wait stack-create-complete --stack-name BackendStack
+
+  slack-workflow-status:
+    if: always()
+    name: Post Workflow Status To Slack
+    needs:
+      - Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Slack Workflow Notification
+        uses: Gamesight/slack-workflow-status@master
+        with:
+          # Required Input
+          repo_token: ${{secrets.GITHUB_TOKEN}}
+          slack_webhook_url: ${{secrets.SLACK_WEBHOOK_URL}}
+          # Optional Input
+          channel: '#doct-vetzy-notifications'
+          name: 'Doct - Backend'

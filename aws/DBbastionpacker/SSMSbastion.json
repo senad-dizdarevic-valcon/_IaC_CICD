@@ -1,0 +1,68 @@
+{
+  "variables": {
+    "aws_access_key": "",
+    "aws_secret_key": ""
+  },
+  "builders": [
+    {
+      "type": "amazon-ebs",
+      "region": "eu-west-1",
+      "access_key": "{{user `aws_access_key`}}",
+      "secret_key": "{{user `aws_secret_key`}}",
+      "source_ami_filter": {
+        "filters": {
+            "name": "Windows_Server-2019-English-Full-Base-*",
+            "root-device-type": "ebs",
+            "virtualization-type": "hvm"
+        },
+        "most_recent": true,
+        "owners": [
+            "801119661308"
+        ]
+      },
+      "instance_type": "t3.medium",
+      "ami_name": "Doct DB bastion win2019 v01.2022 {{timestamp}}",
+      "ami_users": [ "274404885943", "950464077869", "138022411913", "530286139891" ],
+      "tags": {
+        "Project": "Doct"
+      },
+      "launch_block_device_mappings": [
+        {
+          "device_name": "/dev/sda1",
+          "volume_size": 40,
+          "volume_type": "gp2",
+          "delete_on_termination": true
+        }
+      ],
+      "user_data_file": "./setup_winrm.ps1",
+      "communicator": "winrm",
+      "winrm_username": "Administrator",
+      "winrm_use_ssl": true,
+      "winrm_insecure": true
+    }
+  ],
+  "provisioners": [
+      {
+        "type": "windows-shell",
+        "script": "./install.bat"
+    },
+    {
+      "type": "powershell",
+      "script": "./install.ps1"
+    },
+    {
+      "type": "powershell",
+      "inline": [
+          "C:/ProgramData/Amazon/EC2-Windows/Launch/Scripts/InitializeInstance.ps1 -Schedule",
+          "C:/ProgramData/Amazon/EC2-Windows/Launch/Scripts/SysprepInstance.ps1 -NoShutdown"
+      ]
+  }
+  ],
+  "post-processors": [
+    {
+      "type": "manifest",
+      "output": "packer-manifest.json",
+      "strip_path": true
+    }
+  ]
+}

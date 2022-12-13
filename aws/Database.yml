@@ -1,0 +1,497 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: Doct Database and Networking Stack
+
+Parameters:
+  Environment:
+    Description: Deployment environment
+    Type: String
+    Default: dev
+    AllowedValues:
+    - dev
+    - pay
+    - qa
+    - stag
+    - prod
+
+  ProjectName:
+    Description: This will be used for for resource names, keyname and tagging
+    Type: String
+    Default: Doct
+  KeyName:
+    Description: Keypair for EC2 bastion machine
+    Type: String
+    Default: Doct
+  VpcCidr:
+    Description: IP range for VPC
+    Type: String
+    Default: '10.1.0.0/16'
+  VpcCidrPay:
+    Description: IP range for VPC for Pay env
+    Type: String
+    Default: '10.2.0.0/16'
+  DatabaseUsername:
+    Description: Root username to create in RDS instance
+    Type: String
+    Default: sa
+  DatabasePassword:
+    Description: Password for root username in RDS instance
+    Type: String
+    Default: "{{resolve:ssm-secure:/GetServiceApp/DB.password:1}}"
+    NoEcho: 'true'
+  DatabaseSnapshot:
+    Description: Snapshot from which to create RDS instance
+    Type: String
+    Default: ''
+  SRStackName:
+    Type: String
+    Default: StaticResourcesStack
+    Description: Write the name of Static Resources Stack
+  SRStackNamePay:
+    Type: String
+    Default: StaticResourcesStackPay
+    Description: Write the name of Static Resources Stack for Pay env
+
+Metadata:
+    AWS::CloudFormation::Interface:
+        ParameterGroups:
+          - Label:
+              default: ''
+            Parameters:
+              - Environment
+              - ProjectName
+              - KeyName
+              - VpcCidr
+              - VpcCidrPay
+              - BastionImageId
+              - SRStackName
+              - SRStackNamePay
+          - Label:
+              default: 'Database'
+            Parameters:
+              - DatabaseUsername
+              - DatabasePassword
+              - DatabaseSnapshot
+
+Mappings:
+  Database:
+    dev:
+      AllocatedStorage: 50
+      StorageType: gp2
+      InstanceClass: db.t3.small
+      SQLEngine: sqlserver-ex
+      BastionImageId: ami-0aebd9c1f407237c7
+      InstanceTypeBast: t3.medium
+      VolumeSizeBast: 40
+    pay:
+      AllocatedStorage: 50
+      StorageType: gp2
+      InstanceClass: db.t3.small
+      SQLEngine: sqlserver-ex
+      BastionImageId: ami-0aebd9c1f407237c7
+      InstanceTypeBast: t3.medium
+      VolumeSizeBast: 40
+    qa:
+      AllocatedStorage: 50
+      StorageType: gp2
+      InstanceClass: db.t3.small
+      SQLEngine: sqlserver-ex
+      BastionImageId: ami-0aebd9c1f407237c7
+      InstanceTypeBast: t3.medium
+      VolumeSizeBast: 40
+    stag:
+      AllocatedStorage: 100
+      StorageType: gp2
+      InstanceClass: db.t3.medium
+      SQLEngine: sqlserver-web
+      BastionImageId: ami-0aebd9c1f407237c7
+      InstanceTypeBast: t3.medium
+      VolumeSizeBast: 40
+    prod:
+      AllocatedStorage: 100
+      StorageType: gp2
+      InstanceClass: db.m5.large
+      SQLEngine: sqlserver-web
+      BastionImageId: ami-0aebd9c1f407237c7
+      InstanceTypeBast: t3.medium
+      VolumeSizeBast: 40
+
+Conditions:
+  UseSnapshotForDatabase:
+    !Not [!Equals [!Ref DatabaseSnapshot, '']]
+  IsPay: !Equals [!Ref Environment, pay]
+  IsProduction: !Equals [!Ref Environment, prod]
+  IsNotProduction: !Not [!Equals [!Ref Environment, prod]]
+
+Resources:
+### VPC
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !If [IsPay, !Ref VpcCidrPay, !Ref VpcCidr]
+      InstanceTenancy: default
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - {Key: Name, Value: !Sub '${ProjectName}.${Environment}.VPC'}
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - {Key: Name, Value: !Sub '${ProjectName}.${Environment}.IGW'}
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+# Public and private subnets
+  PrivateSubnetZoneA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !Select ['0', !Cidr [!GetAtt Vpc.CidrBlock, '4', '8']]
+      AvailabilityZone: !Select ['0', !GetAZs '']
+      VpcId: !Ref Vpc
+      Tags:
+      - {Key: Name, Value: !Sub '${ProjectName}.${Environment}.Private.Zone.A'}
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  PrivateSubnetZoneB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !Select ['2', !Cidr [!GetAtt Vpc.CidrBlock, '4', '8']]
+      AvailabilityZone: !Select ['1', !GetAZs '']
+      VpcId: !Ref Vpc
+      Tags:
+      - {Key: Name, Value: !Sub '${ProjectName}.${Environment}.Private.Zone.B'}
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  PublicSubnetZoneA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !Select ['1', !Cidr [!GetAtt Vpc.CidrBlock, '4', '8']]
+      AvailabilityZone: !Select ['0', !GetAZs '']
+      VpcId: !Ref Vpc
+      Tags:
+      - {Key: Name, Value: !Sub '${ProjectName}.${Environment}.Public.Zone.A'}
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  PublicSubnetZoneB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !Select ['3', !Cidr [!GetAtt Vpc.CidrBlock, '4', '8']]
+      AvailabilityZone: !Select ['1', !GetAZs '']
+      VpcId: !Ref Vpc
+      Tags:
+      - {Key: Name, Value: !Sub '${ProjectName}.${Environment}.Public.Zone.B'}
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+# Public route table creation and association
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+      - {Key: Name, Value: !Sub '${ProjectName}.${Environment}.PublicRT'}
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  PublicRouteToIGW:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: '0.0.0.0/0'
+      RouteTableId: !Ref PublicRouteTable
+      GatewayId: !Ref InternetGateway 
+
+  PublicSubnetZoneARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetZoneA
+
+  PublicSubnetZoneBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetZoneB
+
+# Private route table creation and association
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+      - {Key: Name, Value: !Sub '${ProjectName}.${Environment}.PrivateRT1'}
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+      - {Key: Name, Value: !Sub '${ProjectName}.${Environment}.PrivateRT2'}
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  PrivateSubnetZoneARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnetZoneA
+
+  PrivateSubnetZoneBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !If [IsProduction, !Ref PrivateRouteTable2, !Ref PrivateRouteTable1]
+      SubnetId: !Ref PrivateSubnetZoneB
+
+### RDS
+  DatabaseSubnetGroupPrivate:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub '${ProjectName} Database Private Subnet Group'
+      SubnetIds:
+        - !Ref PrivateSubnetZoneA
+        - !Ref PrivateSubnetZoneB
+
+# Database creation and association
+  DatabaseInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub '${ProjectName}-${Environment}-database'
+      AllocatedStorage: !FindInMap [Database, !Ref Environment, AllocatedStorage]
+      AllowMajorVersionUpgrade: false
+      AutoMinorVersionUpgrade: true
+      DBInstanceClass: !FindInMap [Database, !Ref Environment, InstanceClass]
+      Port: 1433
+      PubliclyAccessible: false
+      StorageType: !FindInMap [Database, !Ref Environment, StorageType]
+      MasterUsername: !If [UseSnapshotForDatabase, !Ref 'AWS::NoValue', !Ref DatabaseUsername]
+      MasterUserPassword: !If [UseSnapshotForDatabase, !Ref 'AWS::NoValue', !Ref DatabasePassword]
+      Engine: !FindInMap [Database, !Ref Environment, SQLEngine]
+      EngineVersion: '15.00.4153.1.v1'
+      LicenseModel: license-included
+      MultiAZ: false
+      CopyTagsToSnapshot: true
+      DBSubnetGroupName: !Ref DatabaseSubnetGroupPrivate
+      VPCSecurityGroups: [!Ref DatabaseSecurityGroup]
+      DBSnapshotIdentifier: !If [UseSnapshotForDatabase, !Ref DatabaseSnapshot, !Ref 'AWS::NoValue']
+      OptionGroupName:
+        Fn::ImportValue:
+          !If [IsPay, !Sub '${SRStackNamePay}-DatabaseOptionGroup', !Sub '${SRStackName}-DatabaseOptionGroup']
+      Tags:
+      - {Key: workload-type, Value: 'production'}
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${ProjectName} Database Security Group'
+      VpcId: !Ref Vpc
+      Tags:
+        - {Key: Name, Value: !Sub '${ProjectName} Database RDS'}
+        - {Key: Project, Value: !Ref ProjectName}
+        - {Key: Environment, Value: !Ref Environment}
+
+  DatabaseSecurityGroupIngress1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt DatabaseSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 1433
+      ToPort: 1433
+      SourceSecurityGroupId: !GetAtt BastionSecurityGroup.GroupId
+
+### BASTION FOR SECURE ACCESS
+  BastionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${ProjectName} ${Environment} Bastion DB Security Group'
+      VpcId: !Ref Vpc
+      Tags:
+      - {Key: Name, Value: !Sub '${ProjectName}.${Environment}.Bastion.DB.SG'}
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 3389
+        ToPort: 3389
+        CidrIp: '89.164.69.60/32'
+        Description: Office Split Access
+      - IpProtocol: tcp
+        FromPort: 3389
+        ToPort: 3389
+        CidrIp: '52.214.195.153/32'
+        Description: TypeQast VPN
+      - IpProtocol: tcp
+        FromPort: 3389
+        ToPort: 3389
+        CidrIp: '141.138.7.127/32'
+        Description: Office Zagreb Access
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: '0.0.0.0/0'
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: '0.0.0.0/0'
+      - IpProtocol: tcp
+        FromPort: 3389
+        ToPort: 3389
+        CidrIp: !If [IsPay, !Ref VpcCidrPay, !Ref VpcCidr]
+
+  BastionSecurityGroupEgress1:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref BastionSecurityGroup
+      IpProtocol: tcp
+      FromPort: 1433
+      ToPort: 1433
+      DestinationSecurityGroupId: !Ref DatabaseSecurityGroup
+
+  BastionInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      DisableApiTermination: false
+      InstanceInitiatedShutdownBehavior: stop
+      IamInstanceProfile:  !Ref IamProfile
+      ImageId: !FindInMap [Database, !Ref Environment, BastionImageId]
+      InstanceType: !FindInMap [Database, !Ref Environment, InstanceTypeBast]
+      KeyName: !Ref KeyName
+      Monitoring: false
+      Tags:
+      - {Key: Name, Value: !Sub '${ProjectName}.${Environment}.Bastion'}
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+      NetworkInterfaces:
+      - DeleteOnTermination: true
+        DeviceIndex: 0
+        SubnetId: !Ref PublicSubnetZoneA
+        GroupSet: [!Ref BastionSecurityGroup]
+        AssociatePublicIpAddress: true
+      UserData: 
+        Fn::Base64: !Sub |
+          <powershell>
+            ####### Create new user account for support
+            $password = aws ssm get-parameter --name /Doct/aws/bastion.password --region eu-west-1 --with-decryption --query Parameter.Value --output text
+            $Secure_String_Password = ConvertTo-SecureString $password -AsPlainText -Force
+            New-LocalUser "Bastion" -Password $Secure_String_Password -AccountNeverExpires -PasswordNeverExpires
+            Add-LocalGroupMember -Group "Administrators" -Member "Bastion"
+            ####### CREATE TASK SCHEDULER TASK FOR SHUTDOWN IF RUNNING AT 20:00
+            $Trig = New-ScheduledTaskTrigger -Daily -At 8pm
+            $Shut = New-ScheduledTaskAction -Execute "C:\Windows\System32\shutdown.exe" -Argument "/s /f"
+            $Principal = New-ScheduledTaskPrincipal -UserID "Administrator" -LogonType S4U -RunLevel Highest
+            $Settings = New-ScheduledTaskSettingsSet -Compatibility Win8
+            Register-ScheduledTask ShutDownAt20_00 -Action $Shut -Trigger $Trig -Principal $Principal -Settings $Settings
+            Stop-Computer
+          </powershell>
+
+  IamProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: '/'
+      Roles: [!Ref IamRole]
+
+  IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: ['ec2.amazonaws.com']
+          Action: ['sts:AssumeRole']
+      Path: '/'
+
+  SsmPolicy: 
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${ProjectName}.${Environment}.Bastion.SsmPolicy'
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: "Allow"
+          Action:
+          - "ssm:GetParameterHistory"
+          - "ssm:GetParametersByPath"
+          - "ssm:GetParameters"
+          - "ssm:GetParameter"
+          Resource:  
+          - !Sub "arn:aws:ssm:eu-west-1:${AWS::AccountId}:parameter/Doct/aws/bastion.password"
+      Roles:
+      - !Ref IamRole
+
+Outputs:
+# outputs for application VPC
+  VpcId:
+    Value: !Ref Vpc
+    Export:
+      Name: !Sub '${AWS::StackName}-VpcId'
+
+  PublicSubnetZoneAId:
+    Value: !Ref PublicSubnetZoneA
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicSubnetZoneAId'
+
+  PublicSubnetZoneBId:
+    Value: !Ref PublicSubnetZoneB
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicSubnetZoneBId'
+
+  PrivateSubnetZoneAId:
+    Value: !Ref PrivateSubnetZoneA
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateSubnetZoneAId'
+
+  PrivateSubnetZoneBId:
+    Value: !Ref PrivateSubnetZoneB
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateSubnetZoneBId'
+
+  PrivateRouteTable1Id:
+    Value: !Ref PrivateRouteTable1
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateRouteTable1Id'
+
+  PrivateRouteTable2Id:
+    Value: !Ref PrivateRouteTable2
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateRouteTable2Id'
+
+  DBSecurityGroupId:
+    Value: !Ref DatabaseSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-DBSecurityGroupId'
+
+  DBEndpointAdress:
+    Value: 
+      Fn::GetAtt: [DatabaseInstance,Endpoint.Address] 
+    Export:
+      Name: !Sub '${AWS::StackName}-DBEndpointAdress'
+
+  DatabaseVpcCidrId:
+    Value: !If [IsPay, !Ref VpcCidrPay, !Ref VpcCidr]
+    Export:
+      Name: !Sub '${AWS::StackName}-DatabaseVpcCidr'
+
+  BastionSecurityGroupId:
+    Value: !Ref BastionSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-BastionSecurityGroupId'      

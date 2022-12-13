@@ -1,0 +1,492 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Doct Static Resources Stack
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+    - dev
+    - pay
+    - qa
+    - stag
+    - prod
+    Description: Choose environment to deploy
+
+  ProjectName:
+    Description: This will be used for for resource names, keyname and tagging
+    Type: String
+    Default: Doct
+
+  CreateS3Bucket:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+    - 'true'
+    - 'false'
+    Description : Defines if S3 bucket will be created as part of this stack.
+
+  DoctorsSiteBucket:
+    Type: String
+    Default: doct-doctors-app
+    Description : S3 bucket prefix for doctors website
+
+  BOSiteBucket:
+    Type: String
+    Default: doct-bo-app
+    Description : S3 bucket prefix for backoffice website
+
+  ClinicsSiteBucket:
+    Type: String
+    Default: doct-clinics-app
+    Description : S3 bucket prefix for clinics website
+
+Mappings:
+  Env:
+    dev:
+      SQLEngine: sqlserver-ex
+      CORSOriginBO: https://backoffice.dev.doct.app
+      CORSOriginDoctors: https://doctors.dev.doct.app
+    pay:
+      SQLEngine: sqlserver-ex
+      CORSOriginBO: https://backoffice.pay.doct.app
+      CORSOriginDoctors: https://doctors.pay.doct.app
+    qa:
+      SQLEngine: sqlserver-ex
+      CORSOriginBO: https://backoffice.qa.doct.app
+      CORSOriginDoctors: https://doctors.qa.doct.app
+    stag:
+      SQLEngine: sqlserver-web
+      CORSOriginBO: https://backoffice.stag.doct.app
+      CORSOriginDoctors: https://doctors.stag.doct.app
+    prod:
+      SQLEngine: sqlserver-web
+      CORSOriginBO: https://backoffice.doct.app
+      CORSOriginDoctors: https://doctors.doct.app
+
+Conditions:
+  IsDevelop: !Equals [!Ref Environment, dev]
+  IsProduction: !Equals [!Ref Environment, prod]
+  CreateBucket: !Equals [!Ref CreateS3Bucket, 'true']
+  ReleasesBucketDevPolicy: !And
+    - !Condition IsDevelop
+    - !Condition CreateBucket
+
+Resources:
+  # S3 buckets for Frontend
+  BucketDoctors:
+    Condition: CreateBucket
+    DeletionPolicy: Retain
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${DoctorsSiteBucket}-${Environment}'
+      AccessControl: Private
+      VersioningConfiguration: 
+        Status: Suspended
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+      - {Key: Project, Value: !Ref ProjectName}  
+      - {Key: Environment, Value: !Ref Environment}
+
+  BucketBO:
+    Condition: CreateBucket
+    DeletionPolicy: Retain
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${BOSiteBucket}-${Environment}'
+      AccessControl: Private
+      VersioningConfiguration: 
+        Status: Suspended
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+      - {Key: Project, Value: !Ref ProjectName}  
+      - {Key: Environment, Value: !Ref Environment}
+
+  BucketClinics:
+    Condition: CreateBucket
+    DeletionPolicy: Retain
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ClinicsSiteBucket}-${Environment}'
+      AccessControl: Private
+      VersioningConfiguration: 
+        Status: Suspended
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+      - {Key: Project, Value: !Ref ProjectName}  
+      - {Key: Environment, Value: !Ref Environment}
+
+  # S3 buckets for logging
+  CFLogsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Condition: CreateBucket
+    Properties:
+      BucketName: !Sub 'doct-cf-logs-${Environment}'
+      AccessControl: Private
+      VersioningConfiguration: 
+        Status: Suspended
+      Tags:
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  # S3 buckets for app documents
+  DocumentBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Condition: CreateBucket
+    Properties:
+      BucketName: !Sub 'doct-media-${Environment}'
+      AccessControl: Private
+      VersioningConfiguration: 
+        Status: Suspended
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - BucketKeyEnabled: true
+          ServerSideEncryptionByDefault: 
+              SSEAlgorithm: 'AES256' # aws:kms
+              # KMSMasterKeyID: KMS-KEY-ARN
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - HEAD
+            AllowedOrigins:
+              - !FindInMap [Env, !Ref Environment, CORSOriginBO]
+              - !FindInMap [Env, !Ref Environment, CORSOriginDoctors]
+              - !If [IsDevelop, 'http://localhost:4200', !Ref 'AWS::NoValue']
+              - !If [IsDevelop, 'http://localhost:3000', !Ref 'AWS::NoValue']
+            ExposedHeaders: []
+      Tags:
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  DocumentBucketPolicy: 
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: Retain
+    Condition: CreateBucket
+    Properties:
+      Bucket: !Ref DocumentBucket
+      PolicyDocument: 
+        Version: '2012-10-17'
+        Id: PutObjPolicy
+        Statement: 
+        - Sid: DenyUnEncryptedObjectUploads
+          Effect: Deny
+          Action: 
+          - s3:PutObject
+          Principal: '*'
+          Resource: !Sub 'arn:aws:s3:::doct-media-${Environment}/*'
+          Condition:
+            StringNotEquals: 
+              s3:x-amz-server-side-encryption: AES256
+
+  # S3 buckets for public access
+  ProfilesBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Condition: CreateBucket
+    Properties:
+      BucketName: !Sub 'doct-profiles-${Environment}'
+      AccessControl: PublicRead
+      VersioningConfiguration: 
+        Status: Suspended
+      Tags:
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  ProfilesBucketPolicy: 
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: Retain
+    Condition: CreateBucket
+    Properties:
+      Bucket: !Ref ProfilesBucket
+      PolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+        - 
+          Sid: PublicRead
+          Effect: Allow
+          Action: 
+          - s3:GetObject
+          - s3:GetObjectVersion
+          Principal: '*'
+          Resource: !Sub 'arn:aws:s3:::doct-profiles-${Environment}/*'
+
+  # S3 buckets for DB backup and restore
+  DBBackupRestoreBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Condition: CreateBucket
+    Properties:
+      BucketName: !Sub 'doct-db-backup-restore-${Environment}'
+      AccessControl: Private
+      VersioningConfiguration: 
+        Status: Suspended
+      Tags:
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  BackupRestoreBucketPolicy: 
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: Retain
+    Condition: CreateBucket
+    Properties:
+      Bucket: !Ref DBBackupRestoreBucket
+      PolicyDocument: 
+        Version: "2008-10-17"
+        Statement: 
+        - 
+          Effect: Allow
+          Action: 
+          - s3:ListBucket
+          Principal: 
+            AWS:
+            - arn:aws:iam::950464077869:root
+            - arn:aws:iam::138022411913:root
+            - arn:aws:iam::530286139891:root
+            - arn:aws:iam::274404885943:root
+          Resource: !Sub 'arn:aws:s3:::doct-db-backup-restore-${Environment}'
+        - 
+          Effect: Allow
+          Action: 
+          - s3:GetObject
+          - s3:PutObject
+          Principal: 
+            AWS:
+            - arn:aws:iam::950464077869:root
+            - arn:aws:iam::138022411913:root
+            - arn:aws:iam::530286139891:root
+            - arn:aws:iam::274404885943:root
+          Resource: !Sub 'arn:aws:s3:::doct-db-backup-restore-${Environment}/*'
+
+  # S3 buckets for deployment
+  ReleasesBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Condition: CreateBucket
+    Properties:
+      BucketName: !Sub 'doct-releases-${Environment}'
+      LifecycleConfiguration: 
+        Rules: 
+        - Id: !If [IsProduction, 120 day delete artifacts rule, 45 day delete artifacts rule]
+          Prefix: 'Doct.'
+          Status: Enabled
+          ExpirationInDays: !If [IsProduction, 120, 45]
+      AccessControl: Private
+      VersioningConfiguration: 
+        Status: Suspended
+      Tags:
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  ReleasesBucketPolicy: 
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: Retain
+    Condition: ReleasesBucketDevPolicy
+    Properties:
+      Bucket: !Ref ReleasesBucket
+      PolicyDocument: 
+        Version: "2008-10-17"
+        Statement: 
+        - 
+          Effect: Allow
+          Action: 
+          - s3:ListBucket
+          Principal: 
+            AWS:
+            - arn:aws:iam::950464077869:root
+            - arn:aws:iam::138022411913:root
+            - arn:aws:iam::530286139891:root
+            - arn:aws:iam::274404885943:root
+          Resource: "arn:aws:s3:::doct-releases-dev"
+        - 
+          Effect: Allow
+          Action: 
+          - s3:GetObject
+          - s3:PutObject
+          Principal: 
+            AWS:
+            - arn:aws:iam::950464077869:root
+            - arn:aws:iam::138022411913:root
+            - arn:aws:iam::530286139891:root
+            - arn:aws:iam::274404885943:root
+          Resource: "arn:aws:s3:::doct-releases-dev/*"
+
+  # S3 buckets for deployment tools
+  ToolsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Condition: ReleasesBucketDevPolicy
+    Properties:
+      BucketName: !Sub 'doct-deployment-tools-${Environment}'
+      AccessControl: Private
+      VersioningConfiguration: 
+        Status: Suspended
+      Tags:
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  ToolsBucketPolicy: 
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: Retain
+    Condition: ReleasesBucketDevPolicy
+    Properties:
+      Bucket: !Ref ToolsBucket
+      PolicyDocument: 
+        Version: "2008-10-17"
+        Statement: 
+        - 
+          Effect: Allow
+          Action: 
+          - s3:ListBucket
+          Principal: 
+            AWS:
+            - arn:aws:iam::950464077869:root
+            - arn:aws:iam::138022411913:root
+            - arn:aws:iam::530286139891:root
+            - arn:aws:iam::274404885943:root
+          Resource: "arn:aws:s3:::doct-deployment-tools-dev"
+        - 
+          Effect: Allow
+          Action: 
+          - s3:GetObject
+          - s3:PutObject
+          Principal: 
+            AWS:
+            - arn:aws:iam::950464077869:root
+            - arn:aws:iam::138022411913:root
+            - arn:aws:iam::530286139891:root
+            - arn:aws:iam::274404885943:root
+          Resource: "arn:aws:s3:::doct-deployment-tools-dev/*"
+
+  # RDS option group and IAM role
+  DatabaseOptionGroup:
+    Type: AWS::RDS::OptionGroup
+    Properties: 
+      EngineName: !FindInMap [Env, !Ref Environment, SQLEngine]
+      MajorEngineVersion: '15.00'
+      OptionConfigurations: 
+      - OptionName: 'SQLSERVER_BACKUP_RESTORE'
+        OptionSettings:
+        - Name: 'IAM_ROLE_ARN'
+          Value: !GetAtt DBIamRole.Arn
+      OptionGroupDescription: !Sub '${ProjectName}-${Environment} backup-restore DB option group'
+      Tags:
+      - {Key: Name, Value: !Sub '${ProjectName}.${Environment}.DB.OptionGroup'}
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  DBIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: ['rds.amazonaws.com']
+          Action: ['sts:AssumeRole']
+      Path: '/'
+      Tags:
+      - {Key: Name, Value: !Sub '${ProjectName}.${Environment}.DB.IamRole'}
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  DBBackupRestorePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${ProjectName}.${Environment}.DBBackupRestorePolicy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - 's3:ListBucket'
+          - 's3:GetBucketLocation'
+          Resource: !Sub 'arn:aws:s3:::doct-db-backup-restore-${Environment}'
+        - Effect: Allow
+          Action:
+          - 's3:GetObject'
+          - 's3:PutObject'
+          - 's3:ListMultipartUploadParts'
+          - 's3:AbortMultipartUpload'
+          Resource: !Sub 'arn:aws:s3:::doct-db-backup-restore-${Environment}/*'
+      Roles: [!Ref DBIamRole]
+
+  # ECR
+  ECRepo:
+    Type: AWS::ECR::Repository
+    Properties: 
+      LifecyclePolicy: 
+        LifecyclePolicyText:
+          '{
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep only five untagged images, expire all others",
+                "selection": {
+                    "tagStatus": "untagged",
+                    "countType": "imageCountMoreThan",
+                    "countNumber": 5
+                },
+                "action": {
+                    "type": "expire"
+                }
+              }
+            ]
+          }'
+        RegistryId: !Ref 'AWS::AccountId'
+      RepositoryName: !Sub 'doct-${Environment}-ecr'
+      RepositoryPolicyText: 
+        Version: "2012-10-17"
+        Statement: 
+          - 
+            Sid: AllowPushPull
+            Effect: Allow
+            Principal: 
+              AWS: 
+                - 'arn:aws:iam::044067650559:role/teamcity.agent.role' #TODO
+            Action: 
+              - "ecr:GetDownloadUrlForLayer"
+              - "ecr:BatchGetImage"
+              - "ecr:BatchCheckLayerAvailability"
+              - "ecr:PutImage"
+              - "ecr:InitiateLayerUpload"
+              - "ecr:UploadLayerPart"
+              - "ecr:CompleteLayerUpload"
+      Tags: 
+      - {Key: Project, Value: !Ref ProjectName}   
+
+  #SQS
+  SqsQueueApi:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ProjectName}-api-${Environment}'
+      ReceiveMessageWaitTimeSeconds: 0
+      VisibilityTimeout: 120
+      Tags:
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+Outputs:
+  # outputs for application VPC
+  DatabaseOptionGroup:
+    Value: !Ref DatabaseOptionGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-DatabaseOptionGroup'

@@ -1,0 +1,291 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Doct Website CloudFront distributions Stack
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+    - dev
+    - pay
+    - qa
+    - stag
+    - prod
+    Description: Choose environment to deploy
+
+  DomainPrefixDoctors:
+    Type: String
+    Default: doctors
+    Description: Choose domain prefix for Doctors app
+
+  DomainPrefixBO:
+    Type: String
+    Default: backoffice
+    Description: Choose domain prefix for BackOffice app
+
+  DomainPrefixClinics:
+    Type: String
+    Default: clinics
+    Description: Choose domain prefix for Clinics app
+
+  ProjectName:
+    Description: This will be used for for resource names, keyname and tagging
+    Type: String
+    Default: Doct
+
+  DoctorsSiteBucket:
+    Type: String
+    Default: doct-doctors-app
+    Description: Prefix for doctors website
+
+  BOSiteBucket:
+    Type: String
+    Default: doct-bo-app
+    Description : Prefix for backoffice website
+
+  ClinicsSiteBucket:
+    Type: String
+    Default: doct-clinics-app
+    Description : Prefix for clinics website
+
+  HostedZone:
+    Type: String
+    Default: doct.app
+    Description: Hosted zone for project
+
+Mappings:
+  Environment:
+    dev:
+      AcmCertificateId: 12d06ca4-b7f8-44c0-b13f-a064778fcd58
+    pay:
+      AcmCertificateId: ed403e5f-6897-4d71-9766-2b6c0e4a5353
+    qa:
+      AcmCertificateId: 1d304672-1454-4040-8c60-e48677246f6f
+    stag:
+      AcmCertificateId: d764060a-a9f3-4679-bf6a-44a53f53bb7c
+    prod:
+      AcmCertificateId: 25c74d5f-2b13-4d0b-998d-ab4d4da10fca
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, prod]
+
+Resources:
+  # Route53 record for CloudFront distributions
+  DnsRecordCdnDistribution:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      Comment: !Sub '${ProjectName} frontend DNS records'
+      HostedZoneName: !If [IsProduction, !Sub '${HostedZone}.', !Sub '${Environment}.${HostedZone}.']
+      RecordSets:
+      - Name: !If [IsProduction, !Sub '${DomainPrefixDoctors}.${HostedZone}.', !Sub '${DomainPrefixDoctors}.${Environment}.${HostedZone}.']
+        Type: A
+        AliasTarget:
+          HostedZoneId: Z2FDTNDATAQYW2 
+          DNSName: !GetAtt CdnDistributionDoctors.DomainName
+      - Name: !If [IsProduction, !Sub '${DomainPrefixBO}.${HostedZone}.', !Sub '${DomainPrefixBO}.${Environment}.${HostedZone}.']
+        Type: A
+        AliasTarget:
+          HostedZoneId: Z2FDTNDATAQYW2 
+          DNSName: !GetAtt CdnDistributionBO.DomainName
+      - Name: !If [IsProduction, !Sub '${DomainPrefixClinics}.${HostedZone}.', !Sub '${DomainPrefixClinics}.${Environment}.${HostedZone}.']
+        Type: A
+        AliasTarget:
+          HostedZoneId: Z2FDTNDATAQYW2 
+          DNSName: !GetAtt CdnDistributionClinics.DomainName
+
+  # CloudFront distributions
+  CloudFrontOAIDoctors:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Sub 'Identity for ${ProjectName} CloudFront for doctors app'
+
+  CloudFrontOAIBO:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Sub 'Identity for ${ProjectName} CloudFront for backoffice app'
+
+  CloudFrontOAIClinics:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Sub 'Identity for ${ProjectName} CloudFront for clinics app'
+
+  CdnDistributionDoctors:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: Doct Doctors App
+        Aliases: 
+          - !If [IsProduction, !Sub '${DomainPrefixDoctors}.${HostedZone}', !Sub '${DomainPrefixDoctors}.${Environment}.${HostedZone}']
+        Enabled: true
+        PriceClass: PriceClass_100
+        HttpVersion: http2
+        CustomErrorResponses:
+        - ErrorCode: 403
+          ResponsePagePath: '/index.html'
+          ResponseCode: '200'
+          ErrorCachingMinTTL: 300
+        - ErrorCode: 404
+          ResponsePagePath: '/index.html'
+          ResponseCode: '200'
+          ErrorCachingMinTTL: 300
+        DefaultCacheBehavior:
+          TargetOriginId: !Sub "${DoctorsSiteBucket}-${Environment}"
+          ViewerProtocolPolicy: redirect-to-https
+          DefaultTTL: "172800"
+          AllowedMethods: [DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT]
+          CachedMethods: [HEAD, GET]
+          Compress: true
+          ForwardedValues:
+            QueryString: false
+        Logging:
+          Bucket: !Sub 'doct-cf-logs-${Environment}.s3.amazonaws.com'
+          IncludeCookies: true
+          Prefix: !Sub 'cloudfront-logs-doct-${DomainPrefixDoctors}/'
+        Origins:
+        - DomainName: !Sub '${DoctorsSiteBucket}-${Environment}.s3.amazonaws.com'
+          Id: !Sub "${DoctorsSiteBucket}-${Environment}"
+          S3OriginConfig:
+            OriginAccessIdentity: !Sub 'origin-access-identity/cloudfront/${CloudFrontOAIDoctors}'
+        ViewerCertificate:
+          AcmCertificateArn: !Sub ["arn:aws:acm:us-east-1:${AWS::AccountId}:certificate/${CertificateId}", {CertificateId: !FindInMap [Environment, !Ref Environment, AcmCertificateId]}]
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+      Tags:
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  CdnDistributionBO:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: Doct BackOffice App
+        Aliases: 
+          - !If [IsProduction, !Sub '${DomainPrefixBO}.${HostedZone}', !Sub '${DomainPrefixBO}.${Environment}.${HostedZone}']
+        Enabled: true
+        PriceClass: PriceClass_100
+        HttpVersion: http2
+        CustomErrorResponses:
+        - ErrorCode: 403
+          ResponsePagePath: '/index.html'
+          ResponseCode: '200'
+          ErrorCachingMinTTL: 300
+        - ErrorCode: 404
+          ResponsePagePath: '/index.html'
+          ResponseCode: '200'
+          ErrorCachingMinTTL: 300
+        DefaultCacheBehavior:
+          TargetOriginId: !Sub "${BOSiteBucket}-${Environment}"
+          ViewerProtocolPolicy: redirect-to-https
+          DefaultTTL: "172800"
+          AllowedMethods: [DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT]
+          CachedMethods: [HEAD, GET]
+          Compress: true
+          ForwardedValues:
+            QueryString: false
+        Logging:
+          Bucket: !Sub 'doct-cf-logs-${Environment}.s3.amazonaws.com'
+          IncludeCookies: true
+          Prefix: !Sub 'cloudfront-logs-doct-${DomainPrefixBO}/'
+        Origins:
+        - DomainName: !Sub '${BOSiteBucket}-${Environment}.s3.amazonaws.com'
+          Id: !Sub "${BOSiteBucket}-${Environment}"
+          S3OriginConfig:
+            OriginAccessIdentity: !Sub 'origin-access-identity/cloudfront/${CloudFrontOAIBO}'
+        ViewerCertificate:
+          AcmCertificateArn: !Sub ["arn:aws:acm:us-east-1:${AWS::AccountId}:certificate/${CertificateId}", {CertificateId: !FindInMap [Environment, !Ref Environment, AcmCertificateId]}]
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+      Tags:
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  CdnDistributionClinics:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: Doct Clinics App
+        Aliases: 
+          - !If [IsProduction, !Sub '${DomainPrefixClinics}.${HostedZone}', !Sub '${DomainPrefixClinics}.${Environment}.${HostedZone}']
+        Enabled: true
+        PriceClass: PriceClass_100
+        HttpVersion: http2
+        CustomErrorResponses:
+        - ErrorCode: 403
+          ResponsePagePath: '/index.html'
+          ResponseCode: '200'
+          ErrorCachingMinTTL: 300
+        - ErrorCode: 404
+          ResponsePagePath: '/index.html'
+          ResponseCode: '200'
+          ErrorCachingMinTTL: 300
+        DefaultCacheBehavior:
+          TargetOriginId: !Sub "${ClinicsSiteBucket}-${Environment}"
+          ViewerProtocolPolicy: redirect-to-https
+          DefaultTTL: "172800"
+          AllowedMethods: [DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT]
+          CachedMethods: [HEAD, GET]
+          Compress: true
+          ForwardedValues:
+            QueryString: false
+        Logging:
+          Bucket: !Sub 'doct-cf-logs-${Environment}.s3.amazonaws.com'
+          IncludeCookies: true
+          Prefix: !Sub 'cloudfront-logs-doct-${DomainPrefixClinics}/'
+        Origins:
+        - DomainName: !Sub '${ClinicsSiteBucket}-${Environment}.s3.amazonaws.com'
+          Id: !Sub "${ClinicsSiteBucket}-${Environment}"
+          S3OriginConfig:
+            OriginAccessIdentity: !Sub 'origin-access-identity/cloudfront/${CloudFrontOAIClinics}'
+        ViewerCertificate:
+          AcmCertificateArn: !Sub ["arn:aws:acm:us-east-1:${AWS::AccountId}:certificate/${CertificateId}", {CertificateId: !FindInMap [Environment, !Ref Environment, AcmCertificateId]}]
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+      Tags:
+      - {Key: Project, Value: !Ref ProjectName}
+      - {Key: Environment, Value: !Ref Environment}
+
+  BucketPolicyDoctors:
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: Retain
+    Properties: 
+      Bucket: !Sub '${DoctorsSiteBucket}-${Environment}'
+      PolicyDocument: 
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            AWS: !Sub "arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity ${CloudFrontOAIDoctors}"
+          Action: 's3:GetObject'
+          Resource: !Sub 'arn:aws:s3:::${DoctorsSiteBucket}-${Environment}/*'
+
+  BucketPolicyBO:
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: Retain
+    Properties: 
+      Bucket: !Sub '${BOSiteBucket}-${Environment}'
+      PolicyDocument: 
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            AWS: !Sub "arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity ${CloudFrontOAIBO}"
+          Action: 's3:GetObject'
+          Resource: !Sub 'arn:aws:s3:::${BOSiteBucket}-${Environment}/*'
+
+  BucketPolicyClinics:
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: Retain
+    Properties: 
+      Bucket: !Sub '${ClinicsSiteBucket}-${Environment}'
+      PolicyDocument: 
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            AWS: !Sub "arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity ${CloudFrontOAIClinics}"
+          Action: 's3:GetObject'
+          Resource: !Sub 'arn:aws:s3:::${ClinicsSiteBucket}-${Environment}/*'

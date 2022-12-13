@@ -1,0 +1,62 @@
+name: DEV - Build and Deploy Api
+
+env:
+  aws_env: 'dev'
+  aws_id: '950464077869'
+
+on:
+  push:
+    branches: [ develop ]
+  workflow_dispatch:
+  
+jobs:
+  Build_and_Deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_DEV }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_DEV }}
+        aws-region: eu-west-1
+
+    - name: Retrieve an authentication token
+      run: |
+        aws ecr get-login-password --region eu-west-1 | docker login --username AWS --password-stdin ${{ env.aws_id }}.dkr.ecr.eu-west-1.amazonaws.com
+
+    - name: Build docker image
+      run: |
+        docker build -t doct-${{ env.aws_env }}-ecr .
+
+    - name: Tag docker image
+      run: |
+        docker tag doct-${{ env.aws_env }}-ecr:latest ${{ env.aws_id }}.dkr.ecr.eu-west-1.amazonaws.com/doct-${{ env.aws_env }}-ecr:latest
+
+    - name: Push docker image to repository
+      run: | 
+        docker push ${{ env.aws_id }}.dkr.ecr.eu-west-1.amazonaws.com/doct-${{ env.aws_env }}-ecr:latest
+
+    - name: Update ECS cluster with new image
+      run: | 
+        aws ecs update-service --cluster Doct-${{ env.aws_env }}-ECS-cluster --service Doct-${{ env.aws_env }}-service --force-new-deployment
+
+  slack-workflow-status:
+    if: always()
+    name: Post Workflow Status To Slack
+    needs:
+      - Build_and_Deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Slack Workflow Notification
+        uses: Gamesight/slack-workflow-status@master
+        with:
+          # Required Input
+          repo_token: ${{secrets.GITHUB_TOKEN}}
+          slack_webhook_url: ${{secrets.SLACK_WEBHOOK_URL}}
+          # Optional Input
+          channel: '#doct-vetzy-notifications'
+          name: 'Doct - Backend'
